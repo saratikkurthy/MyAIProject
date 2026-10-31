@@ -1,0 +1,4 @@
+RAG stands for Retrieval-Augmented Generation.
+Instead of relying only on what a language model memorized during training,
+RAG first retrieves relevant documents, then asks the model to answer using only those documents.
+This reduces hallucinations and keeps answers grounded in your own data.

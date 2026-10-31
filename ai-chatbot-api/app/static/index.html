@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html><body>
+  <h2>AI Chatbot</h2>
+  <input id="q" placeholder="Ask about RAG or data platforms..." size="60">
+  <button onclick="ask()">Ask</button>
+  <pre id="out"></pre>
+  <script>
+    async function ask() {
+      const question = document.getElementById("q").value;
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({question}),
+      });
+      const data = await res.json();
+      document.getElementById("out").textContent =
+        data.answer + "\n\nSources: " + data.sources.join(", ");
+    }
+  </script>
+</body></html>

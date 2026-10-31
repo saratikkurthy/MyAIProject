@@ -1,0 +1,4 @@
+A data platform for AI needs clean, governed data pipelines.
+Feature engineering turns raw data into features a model can use, and feature stores
+make those features reusable for training and for real-time serving.
+Good data quality and data governance are what make AI applications work in production.
