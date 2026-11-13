@@ -15,10 +15,11 @@ stamp on each page ("Digitized by eGangotri") and nothing else. OCR
 reads the photographed letters instead.
 
 Modes (--mode, or the MODE setting below):
-  * translate (default):    the meaning in Telugu.
-  * transliterate:          the same words, written in Telugu script.
-  * both:                   Telugu script first, then "అనువాదం —" + the
-                            Telugu translation under it.
+  * both (default):             Telugu lipi first (the same words, written
+                                in Telugu script), then "అనువాదం —" + the
+                                Telugu translation under it.
+  * translate:                  the meaning in Telugu only.
+  * transliterate:              the same words in Telugu script only.
 
 What you need installed (once):
   * Python packages:  pip install indic-transliteration python-docx pymupdf
@@ -44,6 +45,7 @@ then run the whole book. The work is saved as it goes (see checkpoints),
 so stopping and re-running does not redo finished pages.
 
 Usage:
+    python scanned_pdf_to_telugu_pdf.py book.pdf --check   # setup only
     python scanned_pdf_to_telugu_pdf.py book.pdf
     python scanned_pdf_to_telugu_pdf.py book.pdf --pages 1-2 --mode translate
     python scanned_pdf_to_telugu_pdf.py book.pdf --pages 1-97 -o book_telugu.pdf
@@ -51,6 +53,8 @@ Usage:
 """
 
 import argparse
+import io
+import os
 import re
 import shutil
 import subprocess
@@ -61,13 +65,19 @@ from pathlib import Path
 # ---------------------------------------------------------------- settings
 # Fill these in if you would rather not type them on the command line.
 # Windows example:  INPUT_PDF = r"C:\Users\ishar\Downloads\book.pdf"
-#INPUT_PDF = ""
-#OUTPUT_PDF = ""          # leave "" for <name>_telugu.pdf
 INPUT_PDF = r"C:\Users\ishar\Downloads\Telegram Desktop\వాంఛాకల్పలతాదేవనాగరం.pdf"
-OUTPUT_PDF = r"F:\ConvertedPDFs\వాంఛాకల్పలతాదేవనాగరంTelugu.docx"
-MODE = "translate"       # "translate", "transliterate", or "both"
+OUTPUT_PDF = r"F:\ConvertedPDFs\వాంఛాకల్పలతాదేవనాగరంTelugu.docx"         # leave "" for <name>_telugu.pdf
+MODE = "both"          # "both" = Telugu lipi + Telugu translation (default),
+                         # "translate" = translation only,
+                         # "transliterate" = Telugu lipi only
 SOURCE_LANG = "sa"       # OCR text language for translation: "sa" = Sanskrit,
                          # "hi" = Hindi. (Only used for translate/both.)
+MYMEMORY_EMAIL = "isharatbabu@gmaol.com"      # your email address, e.g. "you@example.com".
+                         # Optional but worth setting: MyMemory's free
+                         # service allows about 5,000 characters a day
+                         # anonymously, but about 50,000 a day once an
+                         # email is sent with the request. No account or
+                         # password — just your email address.
 PAGES = ""               # e.g. "1-10", or "" for all pages
 DPI = 300                # OCR resolution; 300 is right for printed books
 TESSERACT_CMD = "tesseract"  # full path if tesseract is not on PATH
@@ -88,6 +98,62 @@ except ImportError:
 
 # ---------------------------------------------------------------- OCR
 
+def _crop_to_page(png_bytes: bytes) -> bytes:
+    """Crop a rendered page photo to the light page area.
+
+    Books photographed on a dark surface have most of the frame as
+    empty dark background, and tesseract then finds no text at all
+    (it read 0 characters from one such full photo, and ~734 from the
+    same page cropped to the page). This finds the bright page paper
+    and crops to it, with a small margin. If the page cannot be told
+    apart from the background, or already fills the frame, the image
+    is returned unchanged. Pillow is only needed for this step; if it
+    is missing, cropping is skipped.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return png_bytes
+    try:
+        img = Image.open(io.BytesIO(png_bytes)).convert("L")
+    except Exception:
+        return png_bytes
+    # Work on a small copy for speed; a row counts as "page" when at
+    # least 30% of it is bright paper. Columns are then judged only
+    # within those rows (the page is often a short strip of the frame,
+    # so a column judged over the whole height would never qualify).
+    tw, th = 120, 160
+    small = img.resize((tw, th))
+    px = small.load()
+    bright = [[1 if px[x, y] > 100 else 0 for x in range(tw)] for y in range(th)]
+    rows = [y for y in range(th) if sum(bright[y]) / tw > 0.30]
+    if not rows:
+        return png_bytes
+    y_lo, y_hi = min(rows), max(rows)
+    span = y_hi - y_lo + 1
+    cols = [x for x in range(tw)
+            if sum(bright[y][x] for y in range(y_lo, y_hi + 1)) / span > 0.30]
+    if not cols:
+        return png_bytes
+    W, H = img.size
+    pad_x, pad_y = int(0.02 * W), int(0.02 * H)
+    x0 = max(0, int(min(cols) / tw * W) - pad_x)
+    x1 = min(W, int((max(cols) + 1) / tw * W) + pad_x)
+    y0 = max(0, int(min(rows) / th * H) - pad_y)
+    y1 = min(H, int((max(rows) + 1) / th * H) + pad_y)
+    # If the page already fills (almost) the whole frame, cropping
+    # changes nothing — keep the original.
+    if (x1 - x0) * (y1 - y0) > 0.85 * W * H:
+        return png_bytes
+    try:
+        crop = Image.open(io.BytesIO(png_bytes)).convert("RGB").crop((x0, y0, x1, y1))
+        out = io.BytesIO()
+        crop.save(out, "PNG")
+        return out.getvalue()
+    except Exception:
+        return png_bytes
+
+
 def ocr_page(page, dpi: int = DPI, lang: str = "san+hin",
              tesseract: str = TESSERACT_CMD) -> str:
     """Render one PDF page as an image and read its Devanagari with OCR."""
@@ -101,6 +167,7 @@ def ocr_page(page, dpi: int = DPI, lang: str = "san+hin",
             "tesseract-ocr tesseract-ocr-san tesseract-ocr-hin."
         )
     png = page.get_pixmap(dpi=dpi).tobytes("png")
+    png = _crop_to_page(png)
     result = subprocess.run(
         [tesseract, "stdin", "stdout", "--psm", "6", "-l", lang],
         input=png, capture_output=True,
@@ -158,12 +225,43 @@ def _split_for_translation(text: str, limit: int = 4000) -> list[str]:
     return chunks
 
 
-def translate(text: str, source: str = SOURCE_LANG) -> str:
-    """OCR text -> Telugu translation (Google first, MyMemory fallback).
+def _is_echo(translated: str, original: str) -> bool:
+    """True if a "translation" is just the source text in Telugu script.
 
-    Google takes chunks of up to ~4000 chars, but MyMemory only accepts
-    500 chars at a time — so the fallback re-chunks before sending.
+    MyMemory's Sanskrit->Telugu engine often returns the input words
+    transliterated instead of translated. That looks like Telugu text
+    but adds nothing — and in "both" mode it would just repeat the
+    Telugu-lipi line. Compare the translation with the transliteration
+    of the source; if they match once spaces and punctuation are
+    removed, it is an echo, not a translation.
     """
+    try:
+        telu = transliterate(original)
+    except Exception:
+        return False
+
+    def norm(s: str) -> str:
+        return "".join(ch for ch in s
+                       if ch.strip() and ch not in "।॥.,;:!?()[]{}\"'\u2014-")
+
+    a, b = norm(translated), norm(telu)
+    return bool(a) and a == b
+
+
+def translate(text: str, source: str = SOURCE_LANG) -> str:
+    """OCR text -> Telugu translation.
+
+    The free translation services throttle fast repeated calls: Google
+    allows about 5 requests per second from one address, and MyMemory's
+    free anonymous quota is small (a whole book blows past it in one
+    run). So this sends a whole block's sentences in ONE batch request
+    instead of one request per sentence, waits a full minute when the
+    server says "too many requests", and only then falls back to
+    MyMemory — which itself only accepts 500 characters at a time, so
+    its text is re-chunked before sending.
+    """
+    import time
+
     try:
         from deep_translator import GoogleTranslator, MyMemoryTranslator
     except ImportError:
@@ -173,36 +271,91 @@ def translate(text: str, source: str = SOURCE_LANG) -> str:
         )
     google_src = {"sa": "sa", "hi": "hi"}.get(source, source)
     mymemory_src = {"sa": "sanskrit", "hi": "hindi"}.get(source, source)
+    chunks = _split_for_translation(text)
+    if not chunks:
+        return ""
 
-    def google(chunk: str) -> str:
-        return GoogleTranslator(source=google_src, target="te").translate(chunk)
+    def google_batch(items: list[str]) -> list[str]:
+        return GoogleTranslator(source=google_src,
+                                target="te").translate_batch(items)
 
-    def mymemory(chunk: str) -> str:
-        # MyMemory rejects anything over 500 chars — send it in small pieces.
-        translator = MyMemoryTranslator(source=mymemory_src, target="telugu")
-        parts = _split_for_translation(chunk, limit=450)
-        return " ".join(translator.translate(p) for p in parts)
+    def mymemory_batch(items: list[str]) -> list[str]:
+        translator = MyMemoryTranslator(
+            source=mymemory_src, target="telugu",
+            **({"email": MYMEMORY_EMAIL} if MYMEMORY_EMAIL else {}))
+        out = []
+        for item in items:
+            # MyMemory rejects anything over 500 chars — send it in
+            # small pieces, each in its own batch. Sleep between the
+            # pieces too: translate_batch sends one request per piece,
+            # and back-to-back pieces are what trips the rate limit.
+            parts = _split_for_translation(item, limit=450)
+            translated_parts = []
+            for i, part in enumerate(parts):
+                if i:
+                    time.sleep(1)
+                translated_parts.append(translator.translate(part))
+            out.append(" ".join(translated_parts))
+            time.sleep(0.5)
+        return out
 
-    translated = []
-    for chunk in _split_for_translation(text):
-        result = None
-        for attempt in range(3):
+    # One batch request for all sentences. If Google throttles us, wait
+    # once (30s) and retry; if it is still throttling, mark Google dead
+    # for the REST of this run and use MyMemory from then on — waiting
+    # three minutes per block would make a book take forever.
+    result = None
+    if not getattr(translate, "_google_dead", False):
+        for wait in (0, 30):
+            if wait:
+                print(f"    translation throttled — waiting {wait}s ...",
+                      flush=True)
+                time.sleep(wait)
             try:
-                result = google(chunk)
+                result = google_batch(chunks)
                 break
             except Exception:
-                time.sleep(2 * (attempt + 1))
+                continue
         if result is None:
+            translate._google_dead = True
+            print("    Google Translate is throttling this run — using "
+                  "MyMemory for the remaining blocks.", flush=True)
+    if result is None:
+        # MyMemory throttles by IP/quota too, and it often recovers
+        # after a real wait. Retry with growing waits before giving up
+        # on the block, instead of crashing the whole page on the
+        # first TooManyRequests.
+        last_exc = None
+        for wait in (0, 60, 180):
+            if wait:
+                print(f"    MyMemory throttled — waiting {wait}s "
+                      "before retrying this block ...", flush=True)
+                time.sleep(wait)
             try:
-                result = mymemory(chunk)
+                result = mymemory_batch(chunks)
+                break
             except Exception as exc:
-                raise RuntimeError(
-                    "Translation failed on both Google and MyMemory "
-                    f"({exc}). Wait a few minutes and run again."
-                ) from exc
-        translated.append(result)
-        time.sleep(0.5)
-    return " ".join(translated)
+                last_exc = exc
+                continue
+        if result is None:
+            raise RuntimeError(
+                "Translation failed on both Google and MyMemory "
+                f"({last_exc}). Nothing is lost: the OCR text and every "
+                "finished page are saved, so wait a few minutes and run "
+                "again with --resume to continue from the next page. "
+                "Tip: setting MYMEMORY_EMAIL at the top of this file "
+                "raises MyMemory's free daily quota roughly tenfold. "
+                "For a whole book, the free services are the bottleneck "
+                "— a few pages per day, or an offline model, is the "
+                "reliable way."
+            ) from last_exc
+    time.sleep(1)  # stay under the free endpoint's rate limit
+    translated = " ".join(result)
+    if _is_echo(translated, text):
+        print("    (translation came back as an echo of the original — "
+              "kept as untranslated, will retry on the next run)",
+              flush=True)
+        return ""
+    return translated
 
 
 def split_blocks(text: str) -> list[str]:
@@ -229,7 +382,22 @@ def split_blocks(text: str) -> list[str]:
 # ---------------------------------------------------------------- Telugu font
 
 def find_telugu_font(font_dir: str = FONT_DIR) -> tuple[str, str]:
-    """Find a Telugu Regular+Bold .ttf pair. Returns (regular, bold)."""
+    """Find a Telugu Regular+Bold font pair. Returns (regular, bold).
+
+    Two passes, in this order:
+    1. Exact file names (NotoSansTelugu-Regular/Bold.ttf, NirmalaUI.ttf)
+       in every font folder. This is what wins on Babu's machine: the
+       Noto files sit in the per-user fonts folder.
+    2. A scan for any .ttf/.otf whose name contains "telugu" or
+       "nirmala" — because Windows shows fonts by display name while the
+       file on disk is called something else, and a double-click install
+       puts the file in the per-user fonts folder
+       (%LOCALAPPDATA%\\Microsoft\\Windows\\Fonts), not in
+       C:\\Windows\\Fonts, even though the Fonts window shows both
+       together.
+    A .ttc (font collection) is never picked: the system Nirmala font is
+    Nirmala.ttc, a collection, and reportlab cannot use it directly.
+    """
     candidates: list[Path] = []
     here = Path(__file__).resolve().parent
     if font_dir:
@@ -237,29 +405,86 @@ def find_telugu_font(font_dir: str = FONT_DIR) -> tuple[str, str]:
     candidates.append(here / "fonts")
     if sys.platform.startswith("win"):
         candidates.append(Path(r"C:\Windows\Fonts"))
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            candidates.append(Path(local) / "Microsoft" / "Windows" / "Fonts")
     candidates += [Path("/usr/share/fonts/truetype/noto"),
                    Path("/usr/share/fonts"),
                    Path("/usr/local/share/fonts")]
-    for folder in candidates:
-        reg, bold = None, None
+
+    def exact(folder: Path) -> tuple[str | None, str | None]:
+        reg = bold = None
         for name in ("NotoSansTelugu-Regular.ttf", "NirmalaUI.ttf"):
-            p = folder / name
-            if p.exists():
-                reg = str(p)
+            if (folder / name).exists():
+                reg = str(folder / name)
                 break
         for name in ("NotoSansTelugu-Bold.ttf", "NirmalaUI-Bold.ttf"):
-            p = folder / name
-            if p.exists():
-                bold = str(p)
+            if (folder / name).exists():
+                bold = str(folder / name)
                 break
+        return reg, bold
+
+    # pass 1: exact names, all folders first
+    for folder in candidates:
+        reg, bold = exact(folder)
         if reg:
             return reg, bold or reg
+
+    # pass 2: scan for any telugu/nirmala .ttf/.otf
+    seen_files: list[str] = []
+    seen_ttc: list[str] = []
+    for folder in candidates:
+        if not folder.is_dir():
+            continue
+        try:
+            files = []
+            for pat in ("*.ttf", "*.otf", "*.ttc"):
+                files.extend(folder.rglob(pat))
+            files = sorted(files)
+        except OSError:
+            files = []
+        telu = [p for p in files
+                if ("telugu" in p.name.lower()
+                    or "nirmala" in p.name.lower())]
+        seen_files += [str(p) for p in telu
+                       if p.suffix.lower() in (".ttf", ".otf")]
+        seen_ttc += [str(p) for p in telu if p.suffix.lower() == ".ttc"]
+        reg = bold = None
+        for p in telu:
+            if p.suffix.lower() == ".ttc":
+                continue  # a collection — reportlab cannot use it directly
+            low = p.name.lower()
+            if ("bold" in low or low.endswith("-bd.ttf")
+                    or "-bd." in low):
+                bold = bold or str(p)
+            elif "regular" in low:
+                reg = reg or str(p)
+        if reg is None:
+            for p in telu:
+                if p.suffix.lower() == ".ttc":
+                    continue
+                low = p.name.lower()
+                if ("bold" not in low and not low.endswith("-bd.ttf")
+                        and "-bd." not in low):
+                    reg = str(p)
+                    break
+        if reg:
+            return reg, bold or reg
+    searched = "\n    ".join(str(c) for c in candidates)
+    seen = ("\n    ".join(seen_files) if seen_files
+            else "(no Telugu/Nirmala font file seen in any of them)")
+    ttc_note = ("\nFont collections seen but not usable directly "
+                "(reportlab needs a .ttf, not a .ttc):\n    "
+                + "\n    ".join(seen_ttc)) if seen_ttc else ""
     raise RuntimeError(
-        "No Telugu font found. Download NotoSansTelugu-Regular.ttf and "
-        "NotoSansTelugu-Bold.ttf from Google Fonts and put them in a "
-        "'fonts' folder next to this script (or set FONT_DIR). "
-        "On Windows, Nirmala UI (C:\\Windows\\Fonts\\NirmalaUI.ttf) "
-        "also works if it is present."
+        "No Telugu font found.\n"
+        f"Folders searched:\n    {searched}\n"
+        f"Telugu/Nirmala font files seen there:\n    {seen}"
+        f"{ttc_note}\n"
+        "If your fonts live somewhere else, put "
+        "NotoSansTelugu-Regular.ttf and NotoSansTelugu-Bold.ttf in a "
+        "'fonts' folder next to this script (or set FONT_DIR at the top "
+        "of the file)."
     )
 
 
@@ -291,6 +516,7 @@ def build_pdf(title: str, pages: list[dict], out_path: Path,
     from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.platypus import (BaseDocTemplate, Frame, PageTemplate,
                                     Paragraph, Spacer, PageBreak)
+    from xml.sax.saxutils import escape as xml_escape
 
     pdfmetrics.registerFont(TTFont("Telugu", font_regular))
     pdfmetrics.registerFont(TTFont("Telugu-Bold", font_bold))
@@ -335,7 +561,7 @@ def build_pdf(title: str, pages: list[dict], out_path: Path,
                                        onPage=footer)])
     story = []
     story.append(Spacer(1, 45 * mm))
-    story.append(Paragraph(title, styles["title"]))
+    story.append(Paragraph(xml_escape(title), styles["title"]))
     story.append(Paragraph(
         "తెలుగు అనువాదం — స్కాన్ చేసిన పుస్తకం నుండి OCR ద్వారా",
         styles["subtitle"]))
@@ -352,12 +578,13 @@ def build_pdf(title: str, pages: list[dict], out_path: Path,
             if mode in ("transliterate", "both") and block.get("telu"):
                 for line in block["telu"].splitlines():
                     if line.strip():
-                        story.append(Paragraph(line, styles["body"]))
+                        story.append(Paragraph(xml_escape(line),
+                                               styles["body"]))
             if mode in ("translate", "both") and block.get("trans"):
                 text = block["trans"]
                 if mode == "both":
                     text = "అనువాదం — " + text
-                story.append(Paragraph(text, styles["trans"]))
+                story.append(Paragraph(xml_escape(text), styles["trans"]))
     doc.build(story)
 
 
@@ -388,6 +615,9 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true",
                         help="reuse saved OCR text instead of re-reading "
                              "the pages (translation still re-runs)")
+    parser.add_argument("--check", action="store_true",
+                        help="check setup only (packages, tesseract, font, "
+                             "input/output) and exit without converting")
     args = parser.parse_args()
 
     input_arg = INPUT_PDF or args.input
@@ -409,6 +639,65 @@ def main() -> None:
 
     ocr_path = in_path.with_name(in_path.stem + "_ocr.txt")
     te_path = in_path.with_name(in_path.stem + "_te.txt")
+    # With --resume and a saved OCR checkpoint, no page is re-read, so
+    # tesseract is not needed at all for this run.
+    need_ocr = not (args.resume and ocr_path.exists())
+
+    # ---- pre-flight: fail in seconds, not after hours of OCR ---------
+    # Font and tesseract are checked BEFORE any page is OCR'd, so a
+    # missing font/program is found now instead of at the PDF step.
+    problems = []
+    for pkg in ("pymupdf", "reportlab"):
+        try:
+            __import__(pkg)
+        except ImportError:
+            problems.append(f"package '{pkg}' not installed "
+                            f"(pip install {pkg})")
+    if mode in ("transliterate", "both"):
+        if sanscript is None:
+            problems.append("package 'indic-transliteration' not installed "
+                            "(pip install indic-transliteration)")
+    if mode in ("translate", "both"):
+        try:
+            import deep_translator  # noqa: F401
+        except ImportError:
+            problems.append("package 'deep-translator' not installed "
+                            "(pip install deep-translator)")
+    if not need_ocr:
+        print(f"Resume: using saved OCR text from {ocr_path.name}; "
+              "tesseract not needed for this run.")
+    elif shutil.which(TESSERACT_CMD) is None:
+        problems.append(f"tesseract not found as '{TESSERACT_CMD}' — install "
+                        "it (Windows: UB-Mannheim, tick Sanskrit+Hindi and "
+                        "'Add to PATH') or set TESSERACT_CMD")
+    else:
+        langs = subprocess.run([TESSERACT_CMD, "--list-langs"],
+                               capture_output=True, text=True).stdout
+        # --list-langs prints one code per line after a header line;
+        # accept san/hin anywhere in the list (tesseract may list san+hin
+        # components separately).
+        for code in ("san", "hin"):
+            if not re.search(rf"^{code}$", langs, re.M):
+                problems.append(f"tesseract language '{code}' not installed "
+                                f"(re-run the installer, tick "
+                                f"{'Sanskrit' if code == 'san' else 'Hindi'})")
+    try:
+        font_regular, font_bold = find_telugu_font()
+        check_font_coverage(font_regular)
+    except RuntimeError as exc:
+        problems.append(str(exc))
+        font_regular = font_bold = ""
+    if not out_path.parent.is_dir() or not os.access(out_path.parent, os.W_OK):
+        problems.append(f"output folder not writable: {out_path.parent}")
+    if problems:
+        print("Setup check FAILED:")
+        for p in problems:
+            print(f"  - {p}")
+        sys.exit(1)
+    print(f"Setup check OK: packages, Telugu font "
+          f"({Path(font_regular).name}), input and output all ready.")
+    if args.check:
+        sys.exit(0)
 
     import pymupdf
     doc = pymupdf.open(str(in_path))
@@ -438,20 +727,36 @@ def main() -> None:
         dropped_total += dropped
         ocr_pages[n] = cleaned
         print(f"  page {n}: OCR done in {time.time() - t0:.0f}s, "
-              f"{len(cleaned)} chars")
+              f"{len(cleaned)} chars", flush=True)
     with open(ocr_path, "w", encoding="utf-8") as f:
         for n in sorted(ocr_pages):
             f.write(f"### PAGE {n}\n{ocr_pages[n]}\n")
     print(f"OCR text saved to {ocr_path.name} "
           f"({dropped_total} footer lines dropped)")
 
-    # ---- convert phase (checkpointed) ---------------------------------
-    # translated text is stored per page as: blocks joined by \n\n, and
-    # in "both" mode the transliterated blocks are stored too.
+    # ---- convert phase (checkpointed per page) ------------------------
+    # Finished pages are saved to a JSON file the moment each page is
+    # done. If translation throttling stops the run halfway, re-running
+    # with --resume skips every finished page instead of starting over.
+    import json
+
+    te_json_path = in_path.with_name(in_path.stem + "_te.json")
+    done_pages: dict[str, list[dict]] = {}
+    if args.resume and te_json_path.exists():
+        done_pages = json.loads(te_json_path.read_text(encoding="utf-8"))
+        if mode in ("translate", "both"):
+            # pages with untranslated blocks (echoes, or the run died
+            # mid-page) are converted again, not treated as finished.
+            done_pages = {k: v for k, v in done_pages.items()
+                          if v and all(b.get("trans") for b in v)}
+        print(f"Resume: {len(done_pages)} pages already converted — "
+              "skipping them.")
     pages: list[dict] = []
-    if args.resume and te_path.exists():
-        print("Resume: reusing OCR text; translating blocks again.")
     for n in wanted:
+        if str(n) in done_pages:
+            pages.append({"number": n, "blocks": done_pages[str(n)]})
+            print(f"  page {n}: already converted, skipped")
+            continue
         raw = ocr_pages.get(n, "")
         blocks = []
         for b in split_blocks(raw):
@@ -459,10 +764,15 @@ def main() -> None:
             if mode in ("transliterate", "both"):
                 item["telu"] = transliterate(b)
             if mode in ("translate", "both"):
-                item["trans"] = translate(b, source=source)
+                trans = translate(b, source=source)
+                if trans:
+                    item["trans"] = trans
             blocks.append(item)
         pages.append({"number": n, "blocks": blocks})
-        print(f"  page {n}: converted {len(blocks)} blocks")
+        done_pages[str(n)] = blocks
+        te_json_path.write_text(json.dumps(done_pages, ensure_ascii=False,
+                                           indent=1), encoding="utf-8")
+        print(f"  page {n}: converted {len(blocks)} blocks (saved)", flush=True)
     with open(te_path, "w", encoding="utf-8") as f:
         for page in pages:
             f.write(f"### PAGE {page['number']}\n")
