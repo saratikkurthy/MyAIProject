@@ -4,3 +4,8 @@ uvicorn
 requests
 pytest
 httpx
+indic-transliteration
+python-docx
+pymupdf 
+deep-translator
+reportlab
