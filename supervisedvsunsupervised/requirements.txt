@@ -8,3 +8,4 @@ indic-transliteration
 python-docx
 pymupdf 
 deep-translator
+reportlab
