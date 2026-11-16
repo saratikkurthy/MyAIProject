@@ -9,3 +9,7 @@ python-docx
 pymupdf 
 deep-translator
 reportlab
+yt-dlp
+faster-whisper
+imageio-ffmpeg
+av==13.1.0
