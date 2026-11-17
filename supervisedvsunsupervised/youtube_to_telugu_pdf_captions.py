@@ -83,7 +83,11 @@ def _clean_proxy_env():
 
 
 def _run(cmd, timeout):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    # yt-dlp always writes UTF-8. Decode as UTF-8 explicitly: on Windows
+    # the default (cp1252) mangles non-ASCII titles and can even drop
+    # the title line, which broke get_video_info for Telugu titles.
+    return subprocess.run(cmd, capture_output=True, encoding="utf-8",
+                          errors="replace", timeout=timeout)
 
 
 def find_telugu_font():
@@ -113,7 +117,29 @@ def find_telugu_font():
 
 
 def get_video_info(url):
+    """Fetch the video's title/duration/uploader/id WITHOUT downloading.
+    Uses yt-dlp -j (JSON): the title is JSON-escaped (pure ASCII), so a
+    Telugu title survives ANY console encoding -- the old --print version
+    lost the title on Windows (cp1252), which crashed the script.
+    Falls back to --print if -j ever fails."""
     _clean_proxy_env()
+    cmd = ["yt-dlp", "--no-check-certificates",
+           "--extractor-args", "youtube:player_client=android",
+           "--no-playlist", "--skip-download", "-j", url]
+    r = _run(cmd, 300)
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                return {"title": d.get("title") or d.get("id") or "",
+                        "duration": str(d.get("duration") or ""),
+                        "uploader": d.get("uploader") or "",
+                        "id": d.get("id") or ""}
+    # Fallback: --print (kept in case -j fails on some video).
     cmd = ["yt-dlp", "--no-check-certificates",
            "--extractor-args", "youtube:player_client=android",
            "--no-playlist", "--skip-download",
@@ -129,6 +155,11 @@ def get_video_info(url):
     lines = [l for l in r.stdout.splitlines() if l.strip()
              and not l.startswith("WARNING:")]
     if len(lines) < 4:
+        # Title may be empty on Windows (Telugu title lost in --print);
+        # use the video id as the title rather than crashing.
+        if len(lines) == 3:
+            return {"title": lines[2], "duration": lines[0],
+                    "uploader": lines[1], "id": lines[2]}
         raise RuntimeError("yt-dlp returned unreadable video info:\n"
                            + r.stdout[-400:])
     return {"title": lines[0], "duration": lines[1],
