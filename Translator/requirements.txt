@@ -1,0 +1,7 @@
+pymupdf
+openai
+docx
+python-docx
+reportlab
+pymupdf
+indic-transliteration
