@@ -4,7 +4,7 @@ One pipeline that makes a finished Telugu book — translation, clickable
 index, pictures, PDF **and** Word — for **any** book. Nothing book-specific
 lives in the code; each book is described by one small `book_config.json`
 (see `book_config.example.json`, which holds the real values of the
-*Sarva Karma Anushthan Prakash Part 3* book).
+*Sanskrit* book).
 
 ## The one-command path
 
